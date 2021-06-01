@@ -2,6 +2,7 @@ import time
 import am2302
 
 def test_read():
+
     # sleep a lil so we don't overload the sensor
     time.sleep(1)
 
