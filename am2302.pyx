@@ -2,6 +2,7 @@ from libc.stdint cimport uint8_t
 from libcpp cimport bool
 
 cimport am2302
+import time
 
 cdef bool _initialized = False
 
@@ -95,3 +96,6 @@ def read(pin=7, retries=10):
                 temperature=reader.temperature, 
                 humidity=reader.humidity,
             )
+
+        # wait before checking sensor again
+        time.sleep(1)
