@@ -1,149 +1,262 @@
 #include <wiringPi.h>
 #include <cstdint>
+#include <iostream>
+#include <sstream>
+#include <array>
+#include <bitset>
 
-class CTimer
+struct ScopedTimer
 {
-    private:
-        const uint32_t m_t0;
+    const uint32_t t0;
 
-    public:
+    ScopedTimer() : t0(micros()) {}
 
-        CTimer() : m_t0(micros()) {}
+    uint32_t duration() const {
+        const uint32_t t = micros();
 
-        uint32_t duration() const {
-            const uint32_t t = micros();
-            // check if we wrapped
-            if (t < m_t0)
-                return 0xFFFFFFFF - m_t0 + t + 1;
-            else
-                return t - m_t0;
-        }
+        // check if we wrapped
+        if (t < t0)
+            return 0xFFFFFFFF - t0 + t + 1;
+        else
+            return t - t0;
+    }
 };
 
-template <typename T>
-struct CBitLength { static const uint8_t bitLength = 0U; };
+namespace {
+    template <typename T>
+        bool inRange(T val, T min, T max) {
+            return min <= val && val <= max;
+        }
 
-template <>
-struct CBitLength<uint8_t> { static const uint8_t bitLength = 8U; };
+    template <typename T>
+        std::string formatArray(const T &f_array) {
+            std::stringstream ss;
+            ss << "[";
+            for (unsigned int i = 0; i < f_array.size(); ++i) {
+                ss << f_array[i];
+                if (i < f_array.size() - 1)
+                    ss << ", ";
+            }
+            ss << "]";
+            return ss.str();
+        }
+}
 
-template <>
-struct CBitLength<uint16_t> { static const uint8_t bitLength = 16U; };
 
-class CReader
+struct StreamReader
 {
-    public:
-        int m_pin;
+    int pin;
 
-        uint32_t m_start1, m_start2, m_start3;
+    std::array<uint32_t, 3>
+        timingsStart;
 
-        uint16_t m_temperature, m_humidity;
-        uint8_t m_parity;
+    std::array<uint32_t, 40>
+        timingsHigh,
+        timingsLow;
 
-        bool m_tempDone, m_humidityDone, m_parityDone;
+    StreamReader()
+        : pin(0)
+        , timingsStart()
+        , timingsHigh()
+        , timingsLow()
+    {
+        timingsStart.fill(0U);
+        timingsHigh.fill(0U);
+        timingsLow.fill(0U);
+    }
 
-        int m_awaitLevel;
-        int m_awaitBit;
-        uint32_t m_awaitDuration;
+    void await(const int level, uint32_t *count) const {
+        ScopedTimer timer;
 
-        CReader()
-            : m_pin(0)
-            , m_start1(0U)
-            , m_start2(0U)
-            , m_start3(0U)
-            , m_temperature(0U)
-            , m_humidity(0U)
-            , m_parity(0U)
-            , m_tempDone(false)
-            , m_humidityDone(false)
-            , m_parityDone(false)
-            , m_awaitLevel(-1)
-            , m_awaitBit(-1)
-            , m_awaitDuration(0U)
-        {}
+        uint32_t c = 0U;
+        while (digitalRead(pin) != level && c++ < 1000)
+            delayMicroseconds(1);
 
-    private:
+        *count = timer.duration();
+    }
 
-        bool await(int level, uint32_t min, uint32_t max, uint32_t *count = nullptr) {
-            const CTimer l_timer;
-            while (l_timer.duration() < max) {
-                if (digitalRead(m_pin) == level) {
-                    const auto duration = l_timer.duration();
-                    if (count != nullptr)
-                        *count = duration;
-                    if (duration >= min)
-                        return true;
-                    else {
-                        // store debug info
-                        m_awaitLevel = level;
-                        m_awaitDuration = duration;
-                        return false;
-                    }
-                }
-                delayMicroseconds(1);
+    void sendStart() {
+        pinMode(pin, OUTPUT);
+        digitalWrite(pin, LOW);
+        delay(2);
+        pinMode(pin, INPUT);
+        await(LOW,  &timingsStart[0]);
+        await(HIGH, &timingsStart[1]);
+        await(LOW,  &timingsStart[2]);
+    }
+
+    void receive() {
+        for (unsigned i = 0U; i < timingsHigh.size(); ++i) {
+            await(HIGH, &timingsHigh[i]);
+            await(LOW, &timingsLow[i]);
+        }
+    }
+
+    void run() {
+        sendStart();
+        receive();
+    }
+
+    std::bitset<40> bits() const {
+        std::bitset<40> b;
+        for (int i = 0; i < 40; ++i)
+            b[39 - i] = timingsLow[i] > 50;
+        return b;
+    }
+
+    static
+    uint16_t humidity(const std::bitset<40> bits) {
+        return (bits.to_ullong() >> 24) & 0xFFFF;
+    }
+
+    static
+    uint16_t temperature(const std::bitset<40> bits) {
+        return (bits.to_ullong() >> 8) & 0xFFFF;
+    }
+
+    static
+    uint8_t parity(const std::bitset<40> bits) {
+        return bits.to_ullong() & 0xFF;
+    }
+
+    static
+    bool checkParity(const uint16_t h, const uint16_t t, const uint8_t p) {
+        return p == (((h >> 8) + h + (t >> 8) + t) & 0xFF);
+    }
+
+    bool validStart() const {
+        return inRange<uint32_t>(timingsStart[0], 0, 50)
+            && inRange<uint32_t>(timingsStart[1], 50, 100)
+            && inRange<uint32_t>(timingsStart[2], 50, 100);
+    }
+
+    bool validParity() const {
+        const auto b = bits();
+
+        const uint16_t h = humidity(b);
+        const uint16_t t = temperature(b);
+        const uint8_t p = parity(b);
+
+        return checkParity(h,t,p);
+    }
+
+    bool valid() const {
+        return validStart()
+            && validParity();
+    }
+
+    int defectHigh() const {
+        for (unsigned i = 0U; i < timingsHigh.size(); ++i) {
+            if (!inRange<uint32_t>(timingsHigh[i], 50, 70))
+                return i;
+        }
+        return -1;
+    }
+
+    static
+    bool validLowValue(const uint32_t l) {
+        return inRange<uint32_t>(l, 25, 30)
+            || inRange<uint32_t>(l, 70, 75);
+    }
+
+    int defectLow() const {
+        for (unsigned i = 0U; i < timingsLow.size(); ++i) {
+            if (!validLowValue(timingsLow[i]))
+                return i;
+        }
+        return -1;
+    }
+
+    /*
+     * Error correction
+     *
+     */
+
+    /// Correct a single defect. Returns true if correction was successful or
+    /// false if correction was not possible.
+    bool correct() {
+
+        // check defect locations
+        const int h = defectHigh();
+        const int l = defectLow();
+
+        if (h == -1 && l == -1)
+            return true; // nothing to do
+
+        // check if we have a late transition from low to high
+        if (inRange(l, 0, 38) && l+1 == h)
+            return fixLowToHigh(l);
+
+        return false;
+    }
+
+    bool fixLowToHigh(const int l) {
+        const uint32_t
+            tlcur  = timingsLow[l],
+            thnext = timingsHigh[l+1],
+            tlnext = timingsLow[l+1];
+
+        if (thnext < 50) {
+
+            // calculate offset of current low value to either 73 or 26
+            const uint32_t
+                tlcur_toomuch73 = tlcur - 73,
+                tlcur_toomuch26 = tlcur - 26;
+
+            // calculate high value
+            const uint32_t
+                thnext_toomuch73 = thnext + tlcur_toomuch73 - 54,
+                thnext_toomuch26 = thnext + tlcur_toomuch26 - 54;
+
+            // check if the 'too much' of the new high value results in a valid
+            // next low value
+            if (validLowValue(tlnext + thnext_toomuch73)) {
+                timingsLow[l] = 73;
+                timingsHigh[l+1] = 54;
+                timingsLow[l+1] = tlnext + thnext_toomuch73;
+                return true;
             }
-
-            // store debug info
-            m_awaitLevel = level;
-            m_awaitDuration = l_timer.duration();
-            return false;
-        }
-
-        void low() { digitalWrite(m_pin, LOW); }
-        void high() { digitalWrite(m_pin, HIGH); }
-        void input() { pinMode(m_pin, INPUT); }
-        void output() { pinMode(m_pin, OUTPUT); }
-
-        template <typename T>
-        bool receive(T *f_val) {
-            for (int i = 0; i < CBitLength<T>::bitLength; ++i) {
-                if (!await(HIGH, 0U, 100U)) {
-                    m_awaitBit = i;
-                    return false;
-                }
-
-                uint32_t l_count;
-                if (!await(LOW, 0U, 100U, &l_count))
-                    return false;
-
-                if (l_count > 50)
-                    *f_val |= (1U << (CBitLength<T>::bitLength - 1 - i));
+            else if (validLowValue(tlnext + thnext_toomuch26)) {
+                timingsLow[l] = 26;
+                timingsHigh[l+1] = 54;
+                timingsLow[l+1] = tlnext + thnext_toomuch26;
+                return true;
             }
-            return true;
         }
 
-        bool start()
-        {
-            output();
-            low();
-            delay(3);
-            input();
-            return await(LOW, 0U, 100U, &m_start1)
-                && await(HIGH, 50U, 120U, &m_start2)
-                && await(LOW, 50U, 120U, &m_start3);
-        }
+        return false;
+    }
 
-        bool receiveTemp() {
-            const bool l_res = receive(&m_temperature);
-            m_tempDone = true;
-            return l_res;
-        }
-        bool receiveHumidity() {
-            const bool l_res = receive(&m_humidity);
-            m_humidityDone = true;
-            return l_res;
-        }
-        bool receiveParity() {
-            const bool l_res = receive(&m_parity);
-            m_parityDone = true;
-            return l_res;
-        }
 
-    public:
 
-        bool run() {
-            return start()
-                && receiveHumidity()
-                && receiveTemp()
-                && receiveParity();
-        }
+
+
+
+    void print() const {
+        using namespace std;
+
+        const auto b = bits();
+
+        const uint16_t h = humidity(b);
+        const uint16_t t = temperature(b);
+        const uint8_t p = parity(b);
+
+        const bool parityOk = checkParity(h,t,p);
+
+        cout
+            << "Timings:" << endl
+            << "\tS " << formatArray(timingsStart) << endl
+            << "\tH " << formatArray(timingsHigh) << endl
+            << "\tL " << formatArray(timingsLow) << endl
+            << endl
+            << "Bits:" << endl
+            << "\t" << bitset<40>(b) << endl
+            << endl
+            << "Values:" << endl
+            << "\tH " << h << " " << bitset<16>(h) << endl
+            << "\tT " << t << " " << bitset<16>(t) << endl
+            << "\tP     " << bitset<8>(p) << " (" << boolalpha << parityOk << ")" << endl
+            << endl
+            ;
+    }
 };

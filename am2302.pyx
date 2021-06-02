@@ -15,87 +15,57 @@ def setup():
 def initialized():
     return _initialized
 
-cdef class Reader:
-    cdef am2302.CReader m_reader
+cdef class Stream:
+    cdef am2302.StreamReader reader
 
-    def __init__(self, pin=7):
-        self.m_reader.m_pin = pin
+    def __init__(self, pin):
+        self.reader.pin = pin
 
     def run(self):
-        return self.m_reader.run()
+        self.reader.run()
 
-    # Main output properties
+    def print(self):
+        self.reader.print()
 
-    @property
+    def valid(self):
+        return self.reader.valid()
+
+    def correct(self):
+        return self.reader.correct()
+
+    def humidity(self):
+        return float(self.reader.humidity(self.reader.bits())) / 10.0
+
     def temperature(self):
-        t = self.m_reader.m_temperature
+        t = self.reader.temperature(self.reader.bits())
         if t & 0x8000:
             t = (~t + 1) | 0x8000
         return float(t) / 10.0
 
-    @property
-    def humidity(self):
-        return float(self.m_reader.m_humidity) / 10.0
+    def timingsStart(self, i, val=None):
+        if val is None:
+            return self.reader.timingsStart[i]
+        else:
+            self.reader.timingsStart[i] = val
 
-    @property
-    def parity(self):
-        return self.m_reader.m_parity
+    def timingsHigh(self, i, val=None):
+        if val is None:
+            return self.reader.timingsHigh[i]
+        else:
+            self.reader.timingsHigh[i] = val
 
-    @property
-    def valid(self):
-        h = self.m_reader.m_humidity
-        t = self.m_reader.m_temperature
-        p = self.m_reader.m_parity
-        return (((h >> 8) + h + (t >> 8) + t) & 0xFF) == p
+    def timingsLow(self, i, val=None):
+        if val is None:
+            return self.reader.timingsLow[i]
+        else:
+            self.reader.timingsLow[i] = val
 
-    # Debug properties
+    def defectHigh(self):
+        i = self.reader.defectHigh()
+        if i >= 0:
+            return i
 
-    @property
-    def start1(self):
-        return self.m_reader.m_start1
-    @property
-    def start2(self):
-        return self.m_reader.m_start2
-    @property
-    def start3(self):
-        return self.m_reader.m_start3
-
-    @property
-    def tempDone(self):
-        return self.m_reader.m_tempDone
-    @property
-    def humidityDone(self):
-        return self.m_reader.m_humidityDone
-    @property
-    def parityDone(self):
-        return self.m_reader.m_parityDone
-
-    @property
-    def awaitLevel(self):
-        return self.m_reader.m_awaitLevel
-
-    @property
-    def awaitDuration(self):
-        return self.m_reader.m_awaitDuration
-
-    @property
-    def awaitBit(self):
-        return self.m_reader.m_awaitBit
-
-class am3202_data:
-    def __init__(self, temperature, humidity):
-        self.temperature = temperature
-        self.humidity = humidity
-
-def read(pin=7, retries=10):
-    setup()
-    reader = Reader(pin)
-    for r in range(retries):
-        if reader.run() and reader.valid:
-            return am3202_data(
-                temperature=reader.temperature, 
-                humidity=reader.humidity,
-            )
-
-        # wait before checking sensor again
-        time.sleep(1)
+    def defectLow(self):
+        i = self.reader.defectLow()
+        if i >= 0:
+            return i
