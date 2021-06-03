@@ -41,6 +41,9 @@ def test_valid():
         stream.timingsHigh(i,h)
         stream.timingsLow(i,l)
 
+    stream.fillBits()
+    stream.print()
+
     assert stream.valid()
     assert 29.8 == stream.temperature()
     assert 30.3 == stream.humidity()
@@ -62,28 +65,11 @@ def test_invalid_01():
         stream.timingsHigh(i,h)
         stream.timingsLow(i,l)
 
+    stream.fillBits()
     stream.print()
 
     assert not stream.valid()
-
-    # check defect index
-    assert 13 == stream.defectHigh()
-    assert 12 == stream.defectLow()
-
-    assert stream.correct()
-
-    stream.print()
-
-    # not yet done
-    assert not stream.valid()
-
-    # check next defects
-    assert 39 == stream.defectHigh() # last bit is missing
-    assert 31 == stream.defectLow()
-
-    assert stream.correct()
-
-    #assert stream.valid()
+    assert 1 == stream.missingBits()
 
 def test_invalid_02():
 
@@ -101,32 +87,8 @@ def test_invalid_02():
         stream.timingsHigh(i,h)
         stream.timingsLow(i,l)
 
+    stream.fillBits()
     stream.print()
 
     assert not stream.valid()
-
-    # check defect index
-    assert 9 == stream.defectHigh()
-    assert 39 == stream.defectLow()
-
-    #assert stream.correct()
-    #assert stream.valid()
-
-def run():
-    am2302.setup()
-    stream = am2302.Stream(pin=7)
-
-    stream.run()
-    stream.print()
-
-if __name__ == '__main__':
-    run()
-
-    #print()
-    #print('-- INVALID 01 --' + 64*'-')
-    #print()
-    #test_invalid_01()
-    #print()
-    #print('-- INVALID 02 --' + 64*'-')
-    #print()
-    #test_invalid_02()
+    assert 1 == stream.missingBits()

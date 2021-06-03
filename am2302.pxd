@@ -7,7 +7,9 @@ cdef extern from 'array':
 
 cdef extern from 'bitset':
     cdef cppclass bitset:
-        pass
+        unsigned size()
+        unsigned count()
+        bool test(unsigned)
 
 cdef extern from 'wiringPi.h':
     void wiringPiSetup()
@@ -16,12 +18,14 @@ cdef extern from 'am2302_py.hpp':
 
     cdef cppclass StreamReader:
         int pin
+        bitset bits
+
         void run()
+        void fillBits()
+
         void print()
         bool valid()
-        bool correct()
 
-        bitset bits()
         uint16_t temperature(const bitset &)
         uint16_t humidity(const bitset &)
         uint8_t parity(const bitset &)
@@ -30,5 +34,5 @@ cdef extern from 'am2302_py.hpp':
         array timingsHigh
         array timingsLow
 
-        int defectHigh()
-        int defectLow()
+        bitset missingBits()
+        bool tryCorrect()

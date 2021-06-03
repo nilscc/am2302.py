@@ -23,23 +23,7 @@ struct ScopedTimer
 };
 
 namespace {
-    template <typename T>
-        bool inRange(T val, T min, T max) {
-            return min <= val && val <= max;
-        }
 
-    template <typename T>
-        std::string formatArray(const T &f_array) {
-            std::stringstream ss;
-            ss << "[";
-            for (unsigned int i = 0; i < f_array.size(); ++i) {
-                ss << f_array[i];
-                if (i < f_array.size() - 1)
-                    ss << ", ";
-            }
-            ss << "]";
-            return ss.str();
-        }
 }
 
 
@@ -53,6 +37,9 @@ struct StreamReader
     std::array<uint32_t, 40>
         timingsHigh,
         timingsLow;
+
+    std::bitset<40>
+        bits;
 
     StreamReader()
         : pin(0)
@@ -69,7 +56,7 @@ struct StreamReader
         ScopedTimer timer;
 
         uint32_t c = 0U;
-        while (digitalRead(pin) != level && c++ < 1000)
+        while (digitalRead(pin) != level && c++ < 250)
             delayMicroseconds(1);
 
         *count = timer.duration();
@@ -92,17 +79,86 @@ struct StreamReader
         }
     }
 
+    void fillBits() {
+        for (int i = 0; i < 40; ++i)
+            bits[39 - i] = timingsLow[i] > 50;
+    }
+
     void run() {
         sendStart();
         receive();
+        fillBits();
     }
 
-    std::bitset<40> bits() const {
-        std::bitset<40> b;
-        for (int i = 0; i < 40; ++i)
-            b[39 - i] = timingsLow[i] > 50;
-        return b;
+    bool tryCorrect() {
+        const auto m = missingBits();
+
+        // do not attempt to fix an unreasonable number of missing bits
+        if (m.count() > 5)
+            return false;
+
+        //if (tryCorrectIt(m, bits, 0))
+
+        return false;
     }
+
+    bool tryCorrectIt(
+            const std::bitset<40> &missing,
+            std::bitset<40> bits,
+            const unsigned i) {
+        using namespace std;
+
+        // check if we reached the end of the bitset
+        if (i >= missing.size())
+            return validParity(bits);
+
+        // check if current bit is missing at all
+        if (!missing.test(i))
+            return tryCorrectIt(missing, bits, i+1);
+        else {
+
+            // create bitset mask for shifting
+            bitset<40> m;
+            m.set();
+            m >>= (40-i);
+
+            // mask upper part of bits and shift to left
+            const auto upper = (bits & ~m) << 1;
+
+            // mask lower parts
+            const auto lower = (bits & m);
+
+            // update bits
+            bits = upper | lower;
+
+            // shift also missing by 2
+            if (tryCorrectIt(missing << 1, bits, i+2))
+                return true;
+
+            // flip current bit
+            bits.flip(i);
+            if (tryCorrectIt(missing << 1, bits, i+2))
+                return true;
+
+            // flip next bit
+            bits.flip(i+1);
+            if (tryCorrectIt(missing << 1, bits, i+2))
+                return true;
+
+            // flip current bit back and try one last time
+            bits.flip(i);
+            if (tryCorrectIt(missing << 1, bits, i+2))
+                return true;
+
+            // we tried everything :(
+            return false;
+        }
+    }
+
+    /*
+     * Results
+     *
+     */
 
     static
     uint16_t humidity(const std::bitset<40> bits) {
@@ -119,9 +175,15 @@ struct StreamReader
         return bits.to_ullong() & 0xFF;
     }
 
+    /*
+     * Data validation
+     *
+     */
+
+    template <typename T>
     static
-    bool checkParity(const uint16_t h, const uint16_t t, const uint8_t p) {
-        return p == (((h >> 8) + h + (t >> 8) + t) & 0xFF);
+    bool inRange(T val, T min, T max) {
+        return min <= val && val <= max;
     }
 
     bool validStart() const {
@@ -130,112 +192,71 @@ struct StreamReader
             && inRange<uint32_t>(timingsStart[2], 50, 100);
     }
 
-    bool validParity() const {
-        const auto b = bits();
+    static
+    bool checkParity(const uint16_t h, const uint16_t t, const uint8_t p) {
+        return p == (((h >> 8) + h + (t >> 8) + t) & 0xFF);
+    }
 
-        const uint16_t h = humidity(b);
-        const uint16_t t = temperature(b);
-        const uint8_t p = parity(b);
+    static
+    bool validParity(std::bitset<40> bits) {
+        const uint16_t h = humidity(bits);
+        const uint16_t t = temperature(bits);
+        const uint8_t p = parity(bits);
 
         return checkParity(h,t,p);
     }
 
     bool valid() const {
         return validStart()
-            && validParity();
+            && validParity(bits);
     }
 
-    int defectHigh() const {
-        for (unsigned i = 0U; i < timingsHigh.size(); ++i) {
-            if (!inRange<uint32_t>(timingsHigh[i], 50, 70))
-                return i;
-        }
-        return -1;
-    }
-
-    static
-    bool validLowValue(const uint32_t l) {
-        return inRange<uint32_t>(l, 25, 30)
-            || inRange<uint32_t>(l, 70, 75);
-    }
-
-    int defectLow() const {
-        for (unsigned i = 0U; i < timingsLow.size(); ++i) {
-            if (!validLowValue(timingsLow[i]))
-                return i;
-        }
-        return -1;
-    }
 
     /*
-     * Error correction
+     * Error detection
      *
      */
 
-    /// Correct a single defect. Returns true if correction was successful or
-    /// false if correction was not possible.
-    bool correct() {
+    // Return bitmask with missing HIGH bits
+    static
+    std::bitset<40> _missingBits(const std::array<uint32_t, 40> &array) {
+        std::bitset<40> mask;
 
-        // check defect locations
-        const int h = defectHigh();
-        const int l = defectLow();
+        for (unsigned i = 0U; i < array.size(); ++i)
+            mask[i] = inRange(array[i], 100U, 220U);
 
-        if (h == -1 && l == -1)
-            return true; // nothing to do
-
-        // check if we have a late transition from low to high
-        if (inRange(l, 0, 38) && l+1 == h)
-            return fixLowToHigh(l);
-
-        return false;
+        return mask;
     }
 
-    bool fixLowToHigh(const int l) {
-        const uint32_t
-            tlcur  = timingsLow[l],
-            thnext = timingsHigh[l+1],
-            tlnext = timingsLow[l+1];
+    std::bitset<40> missingBits() const { return _missingBits(timingsHigh) | _missingBits(timingsLow); }
 
-        if (thnext < 50) {
+    
 
-            // calculate offset of current low value to either 73 or 26
-            const uint32_t
-                tlcur_toomuch73 = tlcur - 73,
-                tlcur_toomuch26 = tlcur - 26;
 
-            // calculate high value
-            const uint32_t
-                thnext_toomuch73 = thnext + tlcur_toomuch73 - 54,
-                thnext_toomuch26 = thnext + tlcur_toomuch26 - 54;
 
-            // check if the 'too much' of the new high value results in a valid
-            // next low value
-            if (validLowValue(tlnext + thnext_toomuch73)) {
-                timingsLow[l] = 73;
-                timingsHigh[l+1] = 54;
-                timingsLow[l+1] = tlnext + thnext_toomuch73;
-                return true;
-            }
-            else if (validLowValue(tlnext + thnext_toomuch26)) {
-                timingsLow[l] = 26;
-                timingsHigh[l+1] = 54;
-                timingsLow[l+1] = tlnext + thnext_toomuch26;
-                return true;
-            }
+    /*
+     * Debug output
+     *
+     */
+
+    template <typename T>
+    static
+    std::string formatArray(const T &f_array) {
+        std::stringstream ss;
+        ss << "[";
+        for (unsigned int i = 0; i < f_array.size(); ++i) {
+            ss << f_array[i];
+            if (i < f_array.size() - 1)
+                ss << ", ";
         }
-
-        return false;
+        ss << "]";
+        return ss.str();
     }
-
-
-
-
-
 
     void print() const {
         using namespace std;
 
-        const auto b = bits();
+        const auto b = bits;
 
         const uint16_t h = humidity(b);
         const uint16_t t = temperature(b);

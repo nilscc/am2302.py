@@ -1,7 +1,7 @@
 import time
 import am2302
 
-def _test_read():
+def test_read():
 
     # sleep a lil so we don't overload the sensor
     time.sleep(1)
@@ -22,3 +22,7 @@ def _test_read():
     assert d.humidity <= 100.0
     assert d.temperature >= -50.0
     assert d.temperature <= 100.0
+
+
+if __name__ == '__main__':
+    test_read()
